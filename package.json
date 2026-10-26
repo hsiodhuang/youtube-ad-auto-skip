@@ -1,0 +1,14 @@
+{
+  "name": "youtube-ad-auto-skip",
+  "version": "0.3.1",
+  "private": true,
+  "description": "YouTube 广告自动跳过、广告静音及声音状态保护 Chrome 扩展",
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "test": "node --test tests/page-hook.test.cjs tests/ad-audio.test.cjs",
+    "test:fixture": "python3 tests/server.py"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

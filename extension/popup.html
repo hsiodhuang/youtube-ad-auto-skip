@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube 自动跳过广告</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>YouTube 自动跳过广告</h1>
+  <p id="status" role="status">正在读取状态…</p>
+  <dl>
+    <div><dt>本页点击尝试</dt><dd id="attempts">—</dd></div>
+    <div><dt>点击后观察到广告变化</dt><dd id="confirmed">—</dd></div>
+  </dl>
+  <p class="hint">自动处理开头和中途广告。广告期间静音，跳过或播完后恢复原声音状态。</p>
+  <p class="hint">启用或停用请使用 Chrome 扩展管理页的开关。重新启用后，已打开的视频页请刷新一次。</p>
+  <details><summary>最近检测记录</summary><pre id="events">暂无记录</pre></details>
+  <details><summary>完整诊断数据</summary><pre id="diagnostics">正在读取…</pre></details>
+  <footer id="version"></footer>
+  <script src="popup.js"></script>
+</body>
+</html>

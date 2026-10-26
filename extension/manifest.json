@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube 自动跳过广告",
+  "version": "0.3.1",
+  "description": "自动点击 YouTube 开头和中途广告的跳过按钮；广告期间静音，结束后恢复原声音状态。",
+  "host_permissions": [
+    "https://www.youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "page-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "YouTube 自动跳过广告",
+    "default_popup": "popup.html"
+  },
+  "minimum_chrome_version": "111"
+}

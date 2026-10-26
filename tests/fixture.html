@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>无调试点击隔离验证</title>
+<style>body{font:16px/1.5 system-ui;margin:20px;color:#183028}#movie_player{position:relative;width:760px;height:240px;background:#152833;color:white;margin:12px 0}video{width:100%;height:100%}.ytp-skip-ad-button{position:absolute;right:20px;bottom:25px;padding:12px 25px;font:16px system-ui}#blocker{position:absolute;right:15px;bottom:20px;width:180px;height:70px;background:#b45;z-index:3}pre{white-space:pre-wrap}#result{padding:12px;background:#eef6f1}</style>
+<script>window.fixtureNativeAdd=EventTarget.prototype.addEventListener;</script>
+<script src="/extension/page-hook.js"></script></head>
+<body><h1>无调试点击：隔离网页验证</h1><p>此页模拟广告和 Chrome 标签静音 API；不代表真实 YouTube 广告或真实声音验证。</p><button id="unrelated">普通按钮</button><div id="host"></div><p id="result">正在运行</p><details><summary>验证报告 JSON</summary><pre id="report-json">等待完成</pre></details>
+<script>
+(() => {
+ const started=performance.now(),checks=[],events=[],listeners=[];
+ let skipClicks=0,delegateClicks=0,rawClicks=0,unrelatedTrusted=null,unmarkedTrusted=null;
+ let muteCalls=0,restoreCalls=0,audioRequests=0;
+ const tab={muted:false,owned:false};
+ const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+ const until=async(fn,ms=6500)=>{const t=performance.now();while(performance.now()-t<ms){if(fn())return true;await wait(50);}return false;};
+ const check=(ok,label)=>checks.push({ok:Boolean(ok),label});
+ const event=(type,detail={})=>events.push({ms:Math.round(performance.now()-started),type,...detail});
+ const status=()=>globalThis.__youtubeAdAutoSkip?.getStatus()||null;
+ function queryAudio(requestId){let reply=null;for(const fn of listeners)fn({type:'YAS_QUERY_AD_AUDIO',requestId},{id:'fixture-extension'},value=>{reply=value;});return reply;}
+ window.chrome={runtime:{id:'fixture-extension',getManifest:()=>({version:'0.3.1'}),onMessage:{addListener:fn=>listeners.push(fn),removeListener:fn=>{const i=listeners.indexOf(fn);if(i>=0)listeners.splice(i,1);}},sendMessage:async message=>{
+   if(message.type!=='YAS_SYNC_AD_AUDIO')throw Error('Unexpected worker message; no debugger fixture exists');
+   audioRequests++;const snapshot=queryAudio(message.requestId);if(!snapshot?.ok)return {ok:false,error:'invalid_fixture_audio_snapshot'};
+   if(snapshot.adActive&&!snapshot.userOverride&&!tab.muted){tab.muted=true;tab.owned=true;muteCalls++;event('mock-tab-muted');}
+   else if((!snapshot.adActive||snapshot.userOverride)&&tab.owned){tab.muted=false;tab.owned=false;restoreCalls++;event('mock-tab-restored');}
+   return {ok:true,runId:snapshot.runId,mutedByExtension:tab.owned,userOverride:snapshot.userOverride,reason:snapshot.adActive?'muted_for_ad':'restored'};
+ }}};
+ function makePlayer(disabled=true){
+  const host=document.querySelector('#host');host.innerHTML='<div id="movie_player" class="html5-video-player ad-showing ad-interrupting"><video class="html5-main-video"></video><span class="ytp-ad-text">Ad 1 of 1</span><button type="button" aria-label="跳过广告" class="ytp-skip-ad-button">跳过</button></div>';
+  const player=host.firstElementChild,button=player.querySelector('button'),video=player.querySelector('video');button.disabled=disabled;
+  video.volume=.37;video.muted=false;
+  window.fixtureNativeAdd.call(button,'click',e=>{rawClicks++;event('original-browser-event',{isTrusted:e.isTrusted});},true);
+  button.addEventListener('click',e=>{
+   if(button.dataset.yasPageClick!=='1'){unmarkedTrusted=e.isTrusted;event('unmarked-click',{isTrusted:e.isTrusted});return;}
+   event('skip-handler',{isTrusted:e.isTrusted});
+   if(e.isTrusted!==true)return;
+   skipClicks++;
+   queueMicrotask(()=>{player.classList.remove('ad-showing','ad-interrupting');button.hidden=true;});
+  });
+  return {player,button,video};
+ }
+ let fixture=makePlayer();
+ document.addEventListener('click',e=>{if(e.target===fixture.button&&e.target.dataset.yasPageClick==='1'){delegateClicks++;event('delegate-skip-handler',{isTrusted:e.isTrusted});}},true);
+ document.querySelector('#unrelated').addEventListener('click',e=>{unrelatedTrusted=e.isTrusted;});
+ async function run(){
+  try{
+   document.querySelector('#unrelated').click();check(unrelatedTrusted===false,'普通按钮合成点击保持 isTrusted=false');
+   fixture.button.disabled=false;fixture.button.click();check(unmarkedTrusted===false&&skipClicks===0,'无扩展标记的跳过按钮合成点击不提升事件属性');fixture.button.disabled=true;
+   const source=document.createElement('script');source.src='/extension/content.js';await new Promise((resolve,reject)=>{source.onload=resolve;source.onerror=reject;document.body.append(source);});
+   check(await until(()=>tab.muted&&status()?.audioMutedByExtension===true),'广告开始且跳过禁用时先执行模拟标签静音');
+   await wait(1100);check(skipClicks===0&&(status()?.clickAttempts??0)===0,'禁用按钮不会点击');
+   fixture.button.textContent='5 秒后可跳过广告';fixture.button.setAttribute('aria-label','5 秒后可跳过广告');fixture.button.disabled=false;
+   await wait(1100);check(skipClicks===0&&(status()?.clickAttempts??0)===0,'倒计时未结束时不会点击');
+   const blocker=document.createElement('div');blocker.id='blocker';fixture.player.append(blocker);fixture.button.textContent='跳过';fixture.button.setAttribute('aria-label','跳过广告');
+   await wait(1100);check(skipClicks===0&&(status()?.clickAttempts??0)===0,'官方按钮被覆盖时不会点击');blocker.remove();
+   check(await until(()=>skipClicks===1),'按钮可用后通过页面可信检查处理一次兼容点击');
+   check(await until(()=>status()?.confirmedTransitions===1&&status()?.state==='content'),'广告变化后诊断确认返回正文');
+   check(await until(()=>!tab.muted&&restoreCalls===1),'正文恢复时撤销模拟标签静音');
+   check(events.some(e=>e.type==='original-browser-event'&&e.isTrusted===false),'原始浏览器事件仍为合成事件');
+   check(events.some(e=>e.type==='delegate-skip-handler'&&e.isTrusted===true),'委托监听器也收到兼容事件');
+   check(fixture.video.volume===.37&&fixture.video.muted===false,'自动静音没有改写播放器音量与静音状态');
+   check(!fixture.button.hasAttribute('data-yas-page-click'),'点击完成后清理临时兼容标记');
+   history.pushState({},'','/watch?v=fixture-next');fixture=makePlayer(false);document.dispatchEvent(new CustomEvent('yt-navigate-finish'));
+   check(await until(()=>skipClicks===2),'站内切换视频后仍可自动处理新广告');
+   check(await until(()=>status()?.confirmedTransitions===2&&status()?.videoId==='fixture-next'),'站内切换后采用当前视频身份并确认广告变化');
+   check(await until(()=>!tab.muted&&restoreCalls===2),'第二个视频广告结束后恢复模拟标签声音');
+   check(status()?.pageDispatches===2&&status()?.clickAttempts===2,'两次广告各派发一次兼容点击');
+   check(events.filter(e=>e.type==='skip-handler').every(e=>e.isTrusted===true),'仅扩展标记且经过可用性检查的跳过回调接受兼容属性');
+   check(muteCalls===2&&restoreCalls===2,'两次模拟静音均对应恢复');
+   deliver();
+  }catch(error){check(false,'执行异常：'+String(error));deliver(String(error));}
+ }
+ function deliver(error=null){
+  const report={kind:'local-fixture-not-real-youtube',inputSimulation:'实际运行实验 page-hook.js 和 content.js；页面广告/Chrome音频API为模拟；来源范围由正式扩展清单限定；此页在本地载入同一脚本',ok:checks.length>0&&checks.every(c=>c.ok),checks,error,skipClicks,delegateClicks,rawClicks,audioRequests,muteCalls,restoreCalls,status:status(),events,elapsedMs:Math.round(performance.now()-started)};
+  document.querySelector('#report-json').textContent=JSON.stringify(report,null,2);document.querySelector('#result').textContent=(report.ok?'PASS':'FAIL')+' '+checks.filter(c=>c.ok).length+'/'+checks.length;document.querySelector('#result').dataset.complete='true';document.title=(report.ok?'PASS':'FAIL')+' 无调试点击隔离验证';
+ }
+ run();
+})();
+</script></body></html>
