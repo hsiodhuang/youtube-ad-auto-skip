@@ -132,9 +132,8 @@ const YASAdAudio = (() => {
     }
     if (ownsMute(tab)) return result(snapshot, tab, "ad_muted");
     if (tab.mutedInfo?.muted) return result(snapshot, tab, "preserved_existing_mute");
-    if (!tab.active || !snapshot.visible || !matchesVideo(tab.url, snapshot.videoId)) {
-      return result(snapshot, tab, "waiting_foreground");
-    }
+    // A validated ad in this document is eligible even when its tab/window is
+    // in the background. Ownership and user overrides above remain decisive.
     // Only this single property is accepted; message-supplied tab IDs, volume,
     // URLs or commands never reach a browser mutation API.
     tab = await chrome.tabs.update(tabId, { muted: true });

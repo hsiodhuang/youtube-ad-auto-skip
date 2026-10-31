@@ -7,6 +7,8 @@ const path = require("node:path");
 const vm = require("node:vm");
 const source = readFileSync(path.resolve(__dirname,
   "../extension/ad-audio.js"), "utf8");
+const { version } = JSON.parse(readFileSync(path.resolve(__dirname,
+  "../extension/manifest.json"), "utf8"));
 const copy = value => JSON.parse(JSON.stringify(value));
 const sender = {
   id: "test-extension", frameId: 0, tab: { id: 7 }, documentId: "document-1",
@@ -23,13 +25,13 @@ function harness(config = {}) {
   const state = {
     tab: copy({ id: 7, active: true, url: "https://www.youtube.com/watch?v=video_1",
       mutedInfo: { muted: false }, ...(config.tab || {}) }),
-    snapshot: { ok: true, version: "0.3.1", videoId: "video_1", runId: "run-1",
+    snapshot: { ok: true, version, videoId: "video_1", runId: "run-1",
       adActive: true, visible: true, userOverride: false, ownedAcknowledged: false,
       ...copy(config.snapshot || {}) }
   };
   let controller;
   const chrome = {
-    runtime: { id: "test-extension", getManifest: () => ({ version: "0.3.1" }) },
+    runtime: { id: "test-extension", getManifest: () => ({ version }) },
     tabs: {
       onUpdated: { addListener: fn => updated.push(fn) },
       onRemoved: { addListener: fn => removed.push(fn) },
@@ -113,13 +115,13 @@ test("ordinary content makes no audio change", async () => {
   assert.equal(updates(h).length, 0);
 });
 
-test("pre-existing user, capture, or other-extension tab mute remains untouched", async () => {
+test("pre-existing user, capture, or other-extension tab mute remains untouched in background", async () => {
   for (const info of [
     { muted: true, reason: "user" },
     { muted: true, reason: "capture" },
     { muted: true, reason: "extension", extensionId: "other-extension" }
   ]) {
-    const h = harness({ tab: { mutedInfo: info } });
+    const h = harness({ tab: { active: false, mutedInfo: info }, snapshot: { visible: false } });
     const result = await h.request();
     assert.equal(result.reason, "preserved_existing_mute");
     assert.equal(result.mutedByExtension, false);
@@ -146,8 +148,8 @@ test("continuous adjacent ads keep one run and do not toggle sound between ads",
   assert.deepEqual(updates(h).map(c => c[2]), [{ muted: true }]);
 });
 
-test("manual tab unmute is respected for the rest of the ad run", async () => {
-  const h = harness();
+test("manual tab unmute is respected for the rest of the background ad run", async () => {
+  const h = harness({ tab: { active: false }, snapshot: { visible: false } });
   await h.request();
   h.externalMute({ muted: false, reason: "user" });
   const result = await h.request();
@@ -160,12 +162,12 @@ test("manual tab unmute is respected for the rest of the ad run", async () => {
   assert.equal(updates(h).length, 2);
 });
 
-test("manual re-mute or other-extension takeover is not undone after the ad", async () => {
+test("manual re-mute or other-extension takeover is not undone after a background ad", async () => {
   for (const info of [
     { muted: true, reason: "user" },
     { muted: true, reason: "extension", extensionId: "other-extension" }
   ]) {
-    const h = harness();
+    const h = harness({ tab: { active: false }, snapshot: { visible: false } });
     await h.request();
     h.externalMute(info);
     await h.request();
@@ -177,8 +179,8 @@ test("manual re-mute or other-extension takeover is not undone after the ad", as
   }
 });
 
-test("trusted player volume/mute intent releases only the extension overlay", async () => {
-  const h = harness();
+test("trusted player volume/mute intent releases only the extension overlay in background", async () => {
+  const h = harness({ tab: { active: false }, snapshot: { visible: false } });
   await h.request();
   h.state.snapshot.userOverride = true;
   const result = await h.request();
@@ -252,16 +254,23 @@ test("ad or run changes during the two preparations prevent a stale mutation", a
   }
 });
 
-test("inactive or hidden ads are not newly muted, but restoration does not require foreground", async () => {
-  for (const config of [{ tab: { active: false } }, { snapshot: { visible: false } }]) {
+test("inactive, hidden, and inactive hidden ads mute and restore while remaining in background", async () => {
+  for (const config of [
+    { tab: { active: false } },
+    { snapshot: { visible: false } },
+    { tab: { active: false }, snapshot: { visible: false } }
+  ]) {
     const h = harness(config);
-    assert.equal((await h.request()).reason, "waiting_foreground");
-    assert.equal(updates(h).length, 0);
-    h.state.tab.mutedInfo = copy(ownMute);
+    assert.equal((await h.request()).mutedByExtension, true);
+    assert.deepEqual(updates(h).map(c => c[2]), [{ muted: true }]);
     h.state.snapshot.adActive = false;
     h.state.snapshot.runId = null;
-    assert.equal((await h.request()).mutedByExtension, false);
-    assert.deepEqual(updates(h).map(c => c[2]), [{ muted: false }]);
+    const last = await h.request();
+    assert.equal(last.mutedByExtension, false);
+    assert.equal(last.reason, "ad_ended");
+    assert.deepEqual(updates(h).map(c => c[2]), [{ muted: true }, { muted: false }]);
+    assert.equal(h.state.tab.active, config.tab?.active ?? true);
+    assert.equal(h.state.snapshot.visible, config.snapshot?.visible ?? true);
   }
 });
 

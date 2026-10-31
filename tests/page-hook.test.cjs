@@ -99,6 +99,18 @@ test("intended skip callback receives compatible view; original remains syntheti
   assert.equal(original.defaultPrevented, true);
 });
 
+test("hidden page intended skip receives compatible view; original remains synthetic", () => {
+  const h = setup();
+  h.document.visibilityState = "hidden";
+  const original = h.event();
+  let delivered;
+  h.button.addEventListener("click", e => { delivered = e; });
+  h.button.dispatchEvent(original);
+  assert.notEqual(delivered, original);
+  assert.equal(delivered.isTrusted, true);
+  assert.equal(original.isTrusted, false);
+});
+
 test("delegated document and window callbacks use the event target", () => {
   const h = setup();
   for (const receiver of [h.document, h.window]) {
@@ -199,7 +211,6 @@ for (const [name, alter] of [
   ["unmarked page script click", h => h.button.removeAttribute("data-yas-page-click")],
   ["ordinary non-skip button", h => h.button.classList.clear()],
   ["content playback", h => h.player.classList.delete("ad-showing")],
-  ["hidden page", h => h.document.visibilityState = "hidden"],
   ["non-watch route", h => h.location.pathname = "/"],
   ["watch without video id", h => h.location.search = ""],
   ["disabled skip button", h => h.button.setAttribute("disabled", "")],

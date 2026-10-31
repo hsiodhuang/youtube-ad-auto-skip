@@ -34,7 +34,7 @@
 
   function intendedSkip(event) {
     if (event.type !== "click" || event.isTrusted !== false ||
-        document.visibilityState !== "visible" || location.pathname !== "/watch" ||
+        location.pathname !== "/watch" ||
         !new URL(location.href).searchParams.get("v")) return false;
     const target = event.target;
     if (!(target instanceof Element)) return false;

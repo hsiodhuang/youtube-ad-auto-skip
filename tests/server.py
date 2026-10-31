@@ -1,5 +1,6 @@
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parent
 EXTENSION = ROOT.parent / 'extension'
@@ -10,9 +11,11 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
     def do_GET(self):
-        route = self.path.split('?', 1)[0]
+        parsed = urlsplit(self.path)
+        route = parsed.path
         if route in ('/', '/watch'):
-            self.path = '/fixture.html'
+            background = route == '/watch' and parse_qs(parsed.query).get('fixture') == ['background']
+            self.path = '/background-fixture.html' if background else '/fixture.html'
         elif route.startswith('/extension/'):
             filename = route.removeprefix('/extension/')
             if filename not in ('page-hook.js', 'content.js'):
@@ -37,4 +40,5 @@ class Handler(SimpleHTTPRequestHandler):
 if __name__ == '__main__':
     server = ThreadingHTTPServer(('127.0.0.1', 8766), Handler)
     print('Experimental click fixture: http://127.0.0.1:8766/watch?v=fixture', flush=True)
+    print('Background fixture: http://127.0.0.1:8766/watch?v=background-fixture&fixture=background', flush=True)
     server.serve_forever()

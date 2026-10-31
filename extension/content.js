@@ -334,7 +334,7 @@
         pending.stage !== "dispatching" ||
         message.requestId !== pending.requestId ||
         message.videoId !== state.videoId || message.videoId !== currentVideoId() ||
-        message.episode !== state.adEpisode || document.visibilityState !== "visible") {
+        message.episode !== state.adEpisode) {
       return { ok: false, error: "stale_request" };
     }
     const player = document.querySelector("#movie_player.html5-video-player");

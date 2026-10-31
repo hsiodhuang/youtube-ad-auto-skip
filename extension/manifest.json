@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube 自动跳过广告",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "自动点击 YouTube 开头和中途广告的跳过按钮；广告期间静音，结束后恢复原声音状态。",
   "host_permissions": [
     "https://www.youtube.com/*"

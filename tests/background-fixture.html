@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WAITING 后台标签页隔离验证</title>
+  <style>
+    body { margin: 16px; color: #183028; font: 16px/1.45 system-ui; }
+    h1 { margin: 0 0 8px; font-size: 24px; }
+    p { margin: 8px 0; }
+    #movie_player { position: relative; width: min(760px, calc(100vw - 32px)); height: 220px; margin: 12px 0; background: #152833; color: white; }
+    video { width: 100%; height: 100%; }
+    .ytp-ad-text { position: absolute; left: 16px; top: 12px; }
+    .ytp-skip-ad-button { position: absolute; right: 20px; bottom: 20px; padding: 12px 25px; font: 16px system-ui; }
+    #result { padding: 12px; background: #eef6f1; font-weight: 600; }
+    #checks { padding-left: 24px; }
+    #checks li { margin: 4px 0; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  </style>
+  <script>window.fixtureNativeAdd = EventTarget.prototype.addEventListener;</script>
+  <script src="/extension/page-hook.js"></script>
+</head>
+<body>
+  <h1>后台标签页：隔离网页验证</h1>
+  <p>实际载入生产 page-hook.js / content.js。广告 DOM 与 Chrome 音频 runtime 为本地模拟；无实播、无真实 Chrome 标签静音或声音验证。</p>
+  <p>页面就绪后切换到另一个标签页，保持本页在后台至少 20 秒再回来查看。页面不会自动切换标签页，也不会改写 visibilityState、DOM 可见性或 elementFromPoint。</p>
+  <div id="movie_player" class="html5-video-player ad-showing ad-interrupting">
+    <video class="html5-main-video"></video>
+    <span class="ytp-ad-text">Ad 1 of 1（模拟）</span>
+    <button type="button" aria-label="跳过广告" class="ytp-skip-ad-button" disabled>跳过</button>
+  </div>
+  <p id="result" role="status" aria-live="polite">WAITING 正在载入生产脚本</p>
+  <ul id="checks"></ul>
+  <details><summary>完整验证报告 JSON（本地模拟）</summary><pre id="report-json">等待完成</pre></details>
+  <script>
+    (() => {
+      "use strict";
+
+      const started = performance.now();
+      const player = document.querySelector("#movie_player");
+      const button = player.querySelector("button");
+      const video = player.querySelector("video");
+      const initialDisabled = button.disabled;
+      const events = [];
+      const listeners = [];
+      const rawClicks = [];
+      const compatibleClicks = [];
+      const visibilityEvents = [];
+      const volumeEvents = [];
+      const audioSnapshots = [];
+      const tab = { muted: false, owned: false };
+      const initialAudio = { volume: 0.37, muted: false };
+      let ready = false;
+      let completed = false;
+      let hiddenAt = null;
+      let enabledAt = null;
+      let enableSnapshot = null;
+      let deadlineTimer = null;
+      let monitorTimer = null;
+      let muteCalls = 0;
+      let restoreCalls = 0;
+      let skipClicks = 0;
+      let returnedEarly = false;
+
+      const now = () => Math.round(performance.now() - started);
+      const status = () => globalThis.__youtubeAdAutoSkip?.getStatus() || null;
+      const event = (type, detail = {}) => events.push({ ms: now(), type, ...detail });
+
+      // Use the same runtime boundary as fixture.html. This models ownership
+      // and restoration; it does not call Chrome tabs.update or play audio.
+      function queryAudio(requestId) {
+        let reply = null;
+        for (const listener of listeners) {
+          listener({ type: "YAS_QUERY_AD_AUDIO", requestId },
+            { id: "fixture-extension" }, value => { reply = value; });
+        }
+        return reply;
+      }
+      window.chrome = { runtime: {
+        id: "fixture-extension",
+        getManifest: () => ({ version: "0.3.2" }),
+        onMessage: {
+          addListener: listener => listeners.push(listener),
+          removeListener: listener => {
+            const index = listeners.indexOf(listener);
+            if (index >= 0) listeners.splice(index, 1);
+          }
+        },
+        sendMessage: async message => {
+          if (message.type !== "YAS_SYNC_AD_AUDIO") {
+            throw Error("Unexpected worker message; this fixture has no debugger API");
+          }
+          const snapshot = queryAudio(message.requestId);
+          if (!snapshot?.ok) return { ok: false, error: "invalid_fixture_audio_snapshot" };
+          audioSnapshots.push({ ms: now(), visibility: document.visibilityState, ...snapshot });
+          if (snapshot.adActive && !snapshot.userOverride && !tab.muted) {
+            tab.muted = true;
+            tab.owned = true;
+            muteCalls += 1;
+            event("mock-tab-muted", { visibility: document.visibilityState });
+          } else if ((!snapshot.adActive || snapshot.userOverride) && tab.owned) {
+            tab.muted = false;
+            tab.owned = false;
+            restoreCalls += 1;
+            event("mock-tab-restored", { visibility: document.visibilityState });
+          }
+          return { ok: true, runId: snapshot.runId, mutedByExtension: tab.owned,
+            userOverride: snapshot.userOverride,
+            reason: snapshot.adActive ? "muted_for_ad" : "restored" };
+        }
+      } };
+
+      // Observe native geometry, computed styles and hit testing without
+      // replacing or modifying any of these browser APIs.
+      function observeButton() {
+        const rect = button.getBoundingClientRect();
+        const left = Math.max(0, rect.left);
+        const top = Math.max(0, rect.top);
+        const right = Math.min(innerWidth, rect.right);
+        const bottom = Math.min(innerHeight, rect.bottom);
+        const point = { x: (left + right) / 2, y: (top + bottom) / 2 };
+        const hit = document.elementFromPoint(point.x, point.y);
+        let ancestryVisible = true;
+        for (let node = button; node instanceof HTMLElement; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          if (node.hidden || node.getAttribute("aria-hidden") === "true" ||
+              style.display === "none" || style.visibility !== "visible" ||
+              Number(style.opacity) === 0) ancestryVisible = false;
+        }
+        return {
+          visibility: document.visibilityState,
+          disabled: button.disabled,
+          connected: button.isConnected,
+          rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+            width: rect.width, height: rect.height },
+          point,
+          domVisible: button.isConnected && rect.width >= 2 && rect.height >= 2 &&
+            right - left >= 2 && bottom - top >= 2 && ancestryVisible,
+          hitTest: Boolean(hit && (hit === button || button.contains(hit))),
+          hitElement: hit?.tagName || null,
+          pointerEvents: getComputedStyle(button).pointerEvents
+        };
+      }
+
+      // This listener deliberately bypasses the compatibility wrapper.
+      window.fixtureNativeAdd.call(button, "click", nativeEvent => {
+        const observed = { ms: now(), isTrusted: nativeEvent.isTrusted,
+          visibility: document.visibilityState };
+        rawClicks.push(observed);
+        event("original-browser-event", observed);
+      }, true);
+
+      button.addEventListener("click", compatibleEvent => {
+        const observed = { ms: now(), isTrusted: compatibleEvent.isTrusted,
+          marked: button.dataset.yasPageClick === "1", ...observeButton() };
+        compatibleClicks.push(observed);
+        event("page-skip-handler", observed);
+        if (completed || !observed.marked || observed.isTrusted !== true) return;
+        skipClicks += 1;
+        // Simulate the page's ad-to-content DOM change only after the intended
+        // handler accepted the production compatibility event.
+        queueMicrotask(() => {
+          player.classList.remove("ad-showing", "ad-interrupting");
+          button.hidden = true;
+          event("mock-ad-ended", { visibility: document.visibilityState });
+        });
+      });
+
+      function collectChecks(error) {
+        const current = status();
+        const accepted = compatibleClicks.filter(click => click.marked && click.isTrusted === true);
+        const checks = [];
+        const check = (ok, label) => checks.push({ ok: Boolean(ok), label });
+        check(!error, error ? "执行错误：" + error : "单次后台流程完成（未提前返回前台）");
+        check(initialDisabled, "初始跳过按钮 disabled=true");
+        check(hiddenAt !== null && enabledAt !== null && enabledAt - hiddenAt >= 3000 &&
+          enableSnapshot?.visibility === "hidden",
+          "hidden 期间延迟至少 3 秒启用按钮；延迟=" +
+          (enabledAt === null ? "未启用" : Math.round(enabledAt - hiddenAt) + "ms") +
+          "，启用时 visibilityState=" + (enableSnapshot?.visibility || "无"));
+        check(enableSnapshot?.production?.clickAttempts === 0,
+          "按钮禁用期间 production clickAttempts=" + (enableSnapshot?.production?.clickAttempts ?? "无"));
+        check(enableSnapshot?.domVisible && enableSnapshot?.hitTest &&
+          enableSnapshot?.pointerEvents !== "none",
+          "后台启用时实际 DOM 可见=" + Boolean(enableSnapshot?.domVisible) +
+          "，原生 elementFromPoint 命中按钮=" + Boolean(enableSnapshot?.hitTest));
+        check(skipClicks === 1 && accepted.length === 1 && accepted[0].visibility === "hidden" &&
+          accepted[0].domVisible && accepted[0].hitTest && !returnedEarly,
+          "合法兼容点击次数=" + skipClicks + "；点击时真实 document.visibilityState=" +
+          (accepted[0]?.visibility || "未点击"));
+        check(accepted.length === 1 && accepted[0].isTrusted === true &&
+          rawClicks.length === 1 && rawClicks[0].isTrusted === false && rawClicks[0].visibility === "hidden",
+          "兼容回调 isTrusted=" + (accepted[0]?.isTrusted ?? "无") +
+          "；原始浏览器事件 isTrusted=" + (rawClicks[0]?.isTrusted ?? "无"));
+        check(current?.confirmedTransitions >= 1 && current?.state === "content" &&
+          !player.classList.contains("ad-showing") && !player.classList.contains("ad-interrupting"),
+          "production confirmedTransitions=" + (current?.confirmedTransitions ?? "无") +
+          "，state=" + (current?.state || "无") + "，模拟广告已移除");
+        check(muteCalls === 1 && restoreCalls === 1 && !tab.muted && !tab.owned &&
+          current?.audioMutedByExtension === false &&
+          events.some(entry => entry.type === "mock-tab-restored" && entry.visibility === "hidden"),
+          "模拟标签静音=" + muteCalls + " 次，恢复=" + restoreCalls +
+          " 次；当前模拟 muted=" + tab.muted + "（不代表真实 Chrome 声音）");
+        check(audioSnapshots.some(snapshot => snapshot.visibility === "hidden" &&
+          snapshot.visible === false && snapshot.adActive === true) &&
+          audioSnapshots.some(snapshot => snapshot.visibility === "hidden" &&
+          snapshot.visible === false && snapshot.adActive === false),
+          "生产音频请求包含真实 hidden 时的广告开始/结束状态");
+        check(video.volume === initialAudio.volume && video.muted === initialAudio.muted && volumeEvents.length === 0,
+          "播放器 video.volume=" + video.volume + "，video.muted=" + video.muted +
+          "；初始化后原生 volumechange=" + volumeEvents.length + "，未改变播放器音量/静音");
+        check(!button.hasAttribute("data-yas-page-click"), "生产脚本已清理临时点击标记");
+        return checks;
+      }
+
+      function deliver(error = null) {
+        if (completed) return;
+        completed = true;
+        clearTimeout(deadlineTimer);
+        clearInterval(monitorTimer);
+        const checks = collectChecks(error);
+        const report = {
+          kind: "local-background-fixture-not-real-youtube",
+          inputSimulation: "实际生产脚本；真实浏览器 DOM / 可见性 / 命中测试 / 后台计时；广告与 Chrome 音频 runtime 为模拟；无真实 YouTube 实播与声音验收",
+          ok: checks.every(check => check.ok), error, checks,
+          hiddenAt, enabledAt, completedAt: now(), visibilityAtCompletion: document.visibilityState,
+          returnedEarly, enableSnapshot, skipClicks, rawClicks, compatibleClicks,
+          muteCalls, restoreCalls, simulatedTab: { ...tab },
+          playerAudio: { volume: video.volume, muted: video.muted, volumeEvents },
+          audioSnapshots, visibilityEvents, status: status(), events
+        };
+        const verdict = report.ok ? "PASS" : "FAIL";
+        const summary = document.querySelector("#result");
+        summary.textContent = verdict + " 后台标签页本地模拟 " +
+          checks.filter(check => check.ok).length + "/" + checks.length +
+          (error ? "；" + error : "；点击与模拟声音恢复均在 hidden 时完成");
+        summary.dataset.complete = "true";
+        document.querySelector("#checks").replaceChildren(...checks.map(check => {
+          const item = document.createElement("li");
+          item.textContent = (check.ok ? "PASS " : "FAIL ") + check.label;
+          return item;
+        }));
+        document.querySelector("#report-json").textContent = JSON.stringify(report, null, 2);
+        document.title = verdict + " 后台标签页隔离验证";
+      }
+
+      function maybeComplete() {
+        if (completed || hiddenAt === null) return;
+        const current = status();
+        if (current?.confirmedTransitions >= 1 && current.state === "content" &&
+            restoreCalls >= 1 && !tab.muted && current.audioMutedByExtension === false) deliver();
+      }
+
+      function armHiddenRun() {
+        if (!ready || completed || hiddenAt !== null || document.visibilityState !== "hidden") return;
+        hiddenAt = performance.now() - started;
+        event("background-run-started", { visibility: document.visibilityState });
+        document.querySelector("#result").textContent = "RUNNING 真实 hidden；三秒后启用跳过按钮；20 秒内等待 production transition";
+        deadlineTimer = setTimeout(() => {
+          maybeComplete();
+          if (completed) return;
+          const count = status()?.confirmedTransitions || 0;
+          deliver(count < 1
+            ? "后台 20 秒超时：production confirmedTransitions=" + count + "，未观察到广告转换"
+            : "后台 20 秒超时：已观察到广告转换，但模拟音频恢复未完成");
+        }, 20000);
+        setTimeout(() => {
+          if (completed) return;
+          if (document.visibilityState !== "hidden") {
+            returnedEarly = true;
+            deliver("启用按钮前已回到前台，不能作为后台验证");
+            return;
+          }
+          button.disabled = false;
+          enabledAt = performance.now() - started;
+          enableSnapshot = { ...observeButton(), production: status() };
+          event("skip-enabled-while-hidden", enableSnapshot);
+          document.querySelector("#result").textContent = "RUNNING 已在真实 hidden 中启用按钮；等待生产脚本自动处理";
+        }, 3000);
+        monitorTimer = setInterval(maybeComplete, 250);
+      }
+
+      document.addEventListener("visibilitychange", () => {
+        visibilityEvents.push({ ms: now(), visibility: document.visibilityState });
+        if (completed) return;
+        if (hiddenAt !== null && document.visibilityState !== "hidden") {
+          returnedEarly = true;
+          deliver("流程完成前已返回前台，不能作为后台验证");
+          return;
+        }
+        armHiddenRun();
+      });
+
+      async function run() {
+        try {
+          // Drain the initialization's native volumechange event before
+          // observing production. No media accessors are replaced.
+          await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(Error("初始化 video.volume 的原生事件超时")), 5000);
+            video.addEventListener("volumechange", () => {
+              clearTimeout(timeout);
+              resolve();
+            }, { once: true });
+            video.volume = initialAudio.volume;
+            video.muted = initialAudio.muted;
+          });
+          video.addEventListener("volumechange", () => {
+            volumeEvents.push({ ms: now(), volume: video.volume, muted: video.muted });
+          });
+          const source = document.createElement("script");
+          source.src = "/extension/content.js";
+          await new Promise((resolve, reject) => {
+            source.onload = resolve;
+            source.onerror = () => reject(Error("production content.js 载入失败"));
+            document.body.append(source);
+          });
+          if (!status()) throw Error("production content.js 未提供状态接口");
+          ready = true;
+          document.querySelector("#result").textContent = "WAITING 脚本就绪，按钮 disabled=true；请切到其他标签页并保持本页后台至少 20 秒";
+          armHiddenRun();
+        } catch (error) {
+          deliver(String(error));
+        }
+      }
+      run();
+    })();
+  </script>
+</body>
+</html>
